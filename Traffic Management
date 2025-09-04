@@ -1,0 +1,51 @@
+import random
+
+def simulate(plan, arrivals=[0.4, 0.6, 0.5], service_rate=1.0, cycle_time=120):
+    total_wait = 0
+    total_cars = 0
+    for i, green in enumerate(plan):
+        cars_arrived = arrivals[i] * cycle_time
+        cars_departed = min(cars_arrived, service_rate * green)
+        waiting = cars_arrived - cars_departed
+        total_wait += waiting
+        total_cars += cars_arrived
+    if total_cars == 0:
+        return float("inf")
+    return total_wait / total_cars
+
+def create_plan():
+    return [random.randint(10, 60) for _ in range(3)]
+
+def fitness(plan):
+    return 1 / (1 + simulate(plan))
+
+def select(pop):
+    weights = [fitness(p) for p in pop]
+    return random.choices(pop, weights=weights, k=1)[0]
+
+def crossover(p1, p2):
+    point = random.randint(1, len(p1)-1)
+    return p1[:point] + p2[point:]
+
+def mutate(plan, rate=0.2):
+    if random.random() < rate:
+        i = random.randint(0, len(plan)-1)
+        plan[i] = random.randint(10, 60)
+    return plan
+
+def optimize(generations=20, pop_size=8):
+    pop = [create_plan() for _ in range(pop_size)]
+    for g in range(generations):
+        new_pop = []
+        for _ in range(pop_size):
+            p1, p2 = select(pop), select(pop)
+            child = crossover(p1, p2)
+            child = mutate(child)
+            new_pop.append(child)
+        pop = new_pop
+        best = max(pop, key=fitness)
+        print(f"Gen {g+1}: Best={best}, Efficiency={fitness(best):.4f}")
+    return best
+
+best_plan = optimize()
+print("\nOptimal Signal Plan:", best_plan)
