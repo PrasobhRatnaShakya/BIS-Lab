@@ -1,0 +1,156 @@
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+import random
+import math  # Fix: import math for gamma and pi
+
+def create_traffic_graph():
+    G = nx.Graph()
+    for i in range(6):
+        G.add_node(i)
+    edges = [
+        (0, 1, 2), (0, 2, 2), (1, 2, 1), (1, 3, 1),
+        (2, 3, 2), (2, 4, 3), (3, 4, 2), (3, 5, 1),
+        (4, 5, 2)
+    ]
+    for (u, v, dist) in edges:
+        G.add_edge(u, v, distance=dist)
+    return G
+
+def path_length(G, path):
+    length = 0
+    for i in range(len(path)-1):
+        if G.has_edge(path[i], path[i+1]):
+            length += G[path[i]][path[i+1]]['distance']
+        else:
+            # Invalid path (edge doesn't exist)
+            return float('inf')
+    return length
+
+def random_path(G, start, end):
+    # Generate a random valid path from start to end using DFS
+    stack = [(start, [start])]
+    paths = []
+    while stack:
+        (vertex, path) = stack.pop()
+        for next_node in set(G.neighbors(vertex)) - set(path):
+            if next_node == end:
+                paths.append(path + [next_node])
+            else:
+                stack.append((next_node, path + [next_node]))
+        if len(paths) >= 50:  # limit number of paths generated
+            break
+    if paths:
+        return random.choice(paths)
+    else:
+        # fallback to direct edge if exists
+        if G.has_edge(start, end):
+            return [start, end]
+        else:
+            return [start]
+
+def levy_flight(Lambda=1.5):
+    sigma_u = (math.gamma(1 + Lambda) * math.sin(math.pi * Lambda / 2) /
+               (math.gamma((1 + Lambda) / 2) * Lambda * 2 ** ((Lambda - 1) / 2))) ** (1 / Lambda)
+    u = np.random.normal(0, sigma_u)
+    v = np.random.normal(0, 1)
+    step = u / abs(v) ** (1 / Lambda)
+    return step
+
+def mutate_path(G, path):
+    # Mutate path inspired by Levy flight: randomly remove or insert nodes
+    new_path = path.copy()
+
+    if len(new_path) <= 2:
+        # Can't mutate much, just return
+        return new_path
+
+    step = int(abs(levy_flight()) * 2)  # scale step for mutation length
+    step = max(1, step)  # Ensure at least 1 step
+
+    # Decide mutation type: insert or remove nodes randomly
+    if random.random() < 0.5 and len(new_path) > 2:
+        # Remove a segment
+        start_idx = random.randint(1, len(new_path) - 2)
+        end_idx = min(len(new_path) - 2, start_idx + step)
+        # Remove intermediate nodes, reconnect start and end
+        if G.has_edge(new_path[start_idx - 1], new_path[end_idx + 1]):
+            new_path = new_path[:start_idx] + new_path[end_idx + 1:]
+    else:
+        # Insert nodes (try to find neighbors to insert)
+        insert_pos = random.randint(1, len(new_path) - 1)
+        neighbors = list(G.neighbors(new_path[insert_pos - 1]))
+        neighbors = [n for n in neighbors if n not in new_path]
+        if neighbors:
+            insert_node = random.choice(neighbors)
+            new_path = new_path[:insert_pos] + [insert_node] + new_path[insert_pos:]
+
+    # Validate path: if invalid, fallback to original
+    if path_length(G, new_path) == float('inf'):
+        return path
+    else:
+        return new_path
+
+def visualize_graph(G, best_path=None, title="Traffic Network"):
+    pos = nx.spring_layout(G, seed=42)
+    edge_colors = []
+    widths = []
+    for u, v in G.edges():
+        if best_path and any((u == best_path[i] and v == best_path[i+1]) or (v == best_path[i] and u == best_path[i+1]) for i in range(len(best_path)-1)):
+            edge_colors.append('red')
+            widths.append(4)
+        else:
+            edge_colors.append('gray')
+            widths.append(1)
+    nx.draw(G, pos, with_labels=True, node_color='skyblue', node_size=600, edge_color=edge_colors, width=widths)
+    edge_labels = {(u, v): f"{d['distance']}" for u, v, d in G.edges(data=True)}
+    nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels)
+    plt.title(title)
+    plt.show()
+
+def cuckoo_search_traffic(G, start, end, n_nests=15, pa=0.25, max_iter=100):
+    # Initialize nests with random valid paths
+    nests = [random_path(G, start, end) for _ in range(n_nests)]
+    fitness = [path_length(G, nest) for nest in nests]
+
+    best_idx = np.argmin(fitness)
+    best_nest = nests[best_idx]
+    best_fitness = fitness[best_idx]
+
+    for iteration in range(max_iter):
+        for i in range(n_nests):
+            # Generate new solution by mutation (Levy flight inspired)
+            new_nest = mutate_path(G, nests[i])
+            new_fitness = path_length(G, new_nest)
+
+            # Replace if new solution is better
+            if new_fitness < fitness[i]:
+                nests[i] = new_nest
+                fitness[i] = new_fitness
+
+                # Update global best
+                if new_fitness < best_fitness:
+                    best_fitness = new_fitness
+                    best_nest = new_nest
+
+        # Abandon a fraction pa of worst nests and generate new random solutions
+        num_abandon = int(pa * n_nests)
+        worst_indices = np.argsort(fitness)[-num_abandon:]
+        for idx in worst_indices:
+            nests[idx] = random_path(G, start, end)
+            fitness[idx] = path_length(G, nests[idx])
+
+        print(f"Iteration {iteration+1}/{max_iter}, Best path length: {best_fitness:.2f}")
+
+    return best_nest, best_fitness
+
+if __name__ == "__main__":
+    G = create_traffic_graph()
+    visualize_graph(G, title="Initial Traffic Network")
+
+    start_node = 0
+    end_node = 5
+    best_path, best_length = cuckoo_search_traffic(G, start_node, end_node, max_iter=50)
+
+    print(f"\nBest path found: {best_path} with length {best_length:.2f}")
+    visualize_graph(G, best_path, title="Best Path found by Cuckoo Search")
