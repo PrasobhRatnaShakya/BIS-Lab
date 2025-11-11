@@ -1,0 +1,241 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from multiprocessing import Pool
+import os
+import time
+
+# --- 1. Traffic Network Parameters ---
+# We define our network as a list of dictionaries.
+# Each dictionary is an intersection with its own traffic properties.
+# vol = vehicles per hour (vph)
+# sat = saturation flow rate (vphpl) - max cars that can pass
+# lost_time = seconds per cycle lost to yellow/all-red (e.g., 5s per phase)
+INTERSECTION_PARAMS = [
+    {'name': 'Main St & 1st Ave', 'vol_A': 800, 'sat_A': 1800, 'vol_B': 600, 'sat_B': 1700, 'lost_time': 10},
+    {'name': 'Main St & 2nd Ave', 'vol_A': 750, 'sat_A': 1800, 'vol_B': 700, 'sat_B': 1700, 'lost_time': 10},
+    {'name': 'Park Ave & 1st Ave', 'vol_A': 500, 'sat_A': 1700, 'vol_B': 450, 'sat_B': 1600, 'lost_time': 8},
+    {'name': 'Park Ave & 2nd Ave', 'vol_A': 600, 'sat_A': 1700, 'vol_B': 550, 'sat_B': 1600, 'lost_time': 8},
+    {'name': 'Highway Exit',      'vol_A': 1100, 'sat_A': 1900, 'vol_B': 300, 'sat_B': 1600, 'lost_time': 12},
+]
+NUM_INTERSECTIONS = len(INTERSECTION_PARAMS)
+
+# --- 2. PCOA & GA Parameters ---
+NUM_CELLS = os.cpu_count() - 1 if os.cpu_count() > 1 else 1
+POP_SIZE = 50          # Individuals per cell
+GENERATIONS = 60       # Total generations to run
+MIGRATE_EVERY = 10     # Share solutions every 10 generations
+
+# Constraints for Cycle Times (in seconds)
+MIN_CYCLE_TIME = 45    # Minimum allowed cycle time
+MAX_CYCLE_TIME = 150   # Maximum allowed cycle time
+
+MUTATION_RATE = 0.1
+TOURNAMENT_SIZE = 5
+
+# --- 3. Improved Fitness Function (The Simulation) ---
+
+def simulate_traffic_delay(cycle_times):
+    """
+    Calculates the total network delay based on Webster's delay model.
+    We are MINIMIZING this delay, so the fitness returned is 1.0 / delay.
+    """
+    total_network_delay = 0.0
+
+    for i in range(NUM_INTERSECTIONS):
+        params = INTERSECTION_PARAMS[i]
+        C = cycle_times[i]  # Current cycle time for this intersection
+        L = params['lost_time'] # Total lost time
+
+        # Effective green time available for all phases
+        G_e = C - L
+        if G_e <= 0: # Invalid cycle time
+            return 1e-10 # Return a very small fitness (high penalty)
+
+        # Calculate flow ratios (y = volume / saturation)
+        y_A = params['vol_A'] / params['sat_A']
+        y_B = params['vol_B'] / params['sat_B']
+        Y = y_A + y_B # Total flow ratio for the intersection
+
+        # Check for oversaturation.
+        # If total flow ratio (Y) is greater than available green (Ge/C),
+        # the intersection fails.
+        if Y / (G_e / C) > 0.95: # 0.95 = max 95% capacity
+            return 1e-10 # Return a very small fitness (high penalty)
+
+        # Distribute green time based on flow ratios
+        g_A = G_e * (y_A / Y)
+        g_B = G_e * (y_B / Y)
+
+        # Calculate delay for each phase (A and B)
+        # Using a simplified version of Webster's delay formula
+        delay_A = (0.5 * C * (1 - g_A / C)**2) / (1 - (params['vol_A'] / params['sat_A']))
+        delay_B = (0.5 * C * (1 - g_B / C)**2) / (1 - (params['vol_B'] / params['sat_B']))
+
+        # Total delay for this intersection (weighted by volume)
+        total_intersection_delay = (delay_A * params['vol_A'] + delay_B * params['vol_B'])
+        total_network_delay += total_intersection_delay
+
+    if total_network_delay == 0:
+        return 1e-10
+
+    # We want to MAXIMIZE fitness, so we return the inverse of the delay
+    # A lower delay gives a higher fitness
+    return 1.0 / total_network_delay
+
+# --- 4. Genetic Algorithm Operations ---
+
+def create_individual():
+    """Create a random array of cycle times."""
+    return np.random.randint(MIN_CYCLE_TIME, MAX_CYCLE_TIME + 1, size=NUM_INTERSECTIONS)
+
+def crossover(parent1, parent2):
+    """Uniform crossover."""
+    child1 = np.copy(parent1)
+    child2 = np.copy(parent2)
+    for i in range(NUM_INTERSECTIONS):
+        if np.random.rand() < 0.5:
+            child1[i], child2[i] = child2[i], child1[i] # Swap genes
+    return child1, child2
+
+def mutate(individual):
+    """Mutate one gene (cycle time) by a small random value."""
+    if np.random.rand() < MUTATION_RATE:
+        idx = np.random.randint(0, NUM_INTERSECTIONS)
+        change = np.random.randint(-15, 16) # Change by +/- 15 seconds
+        individual[idx] = np.clip(
+            individual[idx] + change,
+            MIN_CYCLE_TIME,
+            MAX_CYCLE_TIME
+        )
+    return individual
+
+# --- 5. Parallel Evolution (The 'Cell') ---
+
+def evolve_cell(args):
+    """Evolves one cellular population for one generation."""
+    population = args[0]
+
+    # Calculate fitness for all individuals
+    fitnesses = np.array([simulate_traffic_delay(ind) for ind in population])
+
+    # Selection (Tournament)
+    parents = []
+    for _ in range(POP_SIZE // 2):
+        competitors_idx = np.random.choice(POP_SIZE, TOURNAMENT_SIZE, replace=False)
+        winner_idx = competitors_idx[np.argmax(fitnesses[competitors_idx])]
+        parents.append(population[winner_idx])
+
+    # Create next generation
+    next_population = []
+
+    # Elitism: Keep the best individual
+    best_idx_local = np.argmax(fitnesses)
+    best_individual_local = population[best_idx_local]
+    next_population.append(best_individual_local)
+
+    # Crossover & Mutation
+    while len(next_population) < POP_SIZE:
+        idx1, idx2 = np.random.choice(len(parents), 2, replace=False)
+        p1, p2 = parents[idx1], parents[idx2]
+        c1, c2 = crossover(p1, p2)
+        next_population.append(mutate(c1))
+        if len(next_population) < POP_SIZE:
+            next_population.append(mutate(c2))
+
+    return next_population, (best_individual_local, fitnesses[best_idx_local])
+
+# --- 6. Main PCOA Orchestrator ---
+
+def run_pcoa_traffic_optimization():
+    global NUM_CELLS
+    print(f"Starting PCOA for Traffic Signal Timing with {NUM_CELLS} parallel cells...")
+    print(f"Optimizing {NUM_INTERSECTIONS} intersections over {GENERATIONS} generations.")
+
+    # Initialize all cellular populations
+    all_populations = [[create_individual() for _ in range(POP_SIZE)]
+                       for _ in range(NUM_CELLS)]
+
+    best_overall_individual = None
+    best_overall_fitness = -np.inf
+
+    # Lists to store history for graphing
+    best_delay_history = []
+    avg_delay_history = []
+
+    start_time = time.time()
+
+    with Pool(processes=NUM_CELLS) as pool:
+        for gen in range(GENERATIONS):
+            tasks = [(pop,) for pop in all_populations]
+            results = pool.map(evolve_cell, tasks)
+
+            all_populations = [res[0] for res in results]
+            gen_bests = [res[1] for res in results]
+
+            # --- Track generation fitness for graphing ---
+            all_gen_fitness = [fit for _, fit in gen_bests]
+            best_gen_fitness = max(all_gen_fitness)
+            avg_gen_fitness = np.mean(all_gen_fitness)
+
+            # Convert fitness (1/delay) back to delay for reporting
+            best_delay_history.append(1.0 / best_gen_fitness)
+            avg_delay_history.append(1.0 / avg_gen_fitness)
+
+            # Track overall best
+            for ind, fit in gen_bests:
+                if fit > best_overall_fitness:
+                    best_overall_fitness = fit
+                    best_overall_individual = ind
+
+            if (gen + 1) % 10 == 0:
+                delay = 1.0 / best_overall_fitness
+                print(f"Gen {gen+1:02d}: Best Delay = {delay:.2f}")
+
+            # --- Migration Phase ---
+            if (gen + 1) % MIGRATE_EVERY == 0 and gen > 0:
+                print(f"--- Gen {gen+1}: Migrating best cycle sets ---")
+                best_migrants = [best[0] for best in gen_bests]
+
+                for i in range(NUM_CELLS):
+                    migrant = best_migrants[i]
+                    target_pop = all_populations[(i + 1) % NUM_CELLS]
+
+                    fitnesses = np.array([simulate_traffic_delay(ind) for ind in target_pop])
+                    worst_idx = np.argmin(fitnesses)
+                    target_pop[worst_idx] = migrant # Replace worst
+
+    end_time = time.time()
+
+    # --- 7. Final Results ---
+    final_delay = 1.0 / best_overall_fitness
+
+    print("\n" + "="*40)
+    print("🚦 Optimization Finished 🚦")
+    print("="*40)
+    print(f"Total Optimization Time: {end_time - start_time:.2f} seconds")
+    print(f"**Best Network Delay (Arbitrary Units):** {final_delay:.2f}")
+
+    print("\nOptimal Timings per Intersection:")
+    print("-" * 50)
+    print(f"| {'Intersection':<20} | {'Cycle Time (s)':<15} |")
+    print("-" * 50)
+    for i, t in enumerate(best_overall_individual):
+        print(f"| {INTERSECTION_PARAMS[i]['name']:<20} | {t:<15} |")
+    print("-" * 50)
+
+    # --- 8. Graphing ---
+
+    plt.figure(figsize=(12, 7))
+    plt.plot(best_delay_history, label='Best Network Delay', color='blue', linewidth=2)
+    plt.plot(avg_delay_history, label='Average Network Delay', color='orange', linestyle='--')
+    plt.xlabel('Generation')
+    plt.ylabel('Total Network Delay (Lower is Better)')
+    plt.title('PCOA Convergence for Traffic Signal Optimization')
+    plt.legend()
+    plt.grid(True)
+    plt.show()
+
+
+# This standard check allows the script to be run in Colab/Jupyter or as a .py file
+if __name__ == '__main__':
+    run_pcoa_traffic_optimization()
