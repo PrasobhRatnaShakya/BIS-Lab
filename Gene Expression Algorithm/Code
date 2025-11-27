@@ -1,0 +1,214 @@
+# Evolving a simple chemical kinetics rate law using a toy GEP/GPstyle symbolic regression
+# Requirements: numpy, pandas, matplotlib
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import random
+import math
+# -----------------------------
+# 1. Generate synthetic kinetics data (A -> B, first-order: dA/dt =
+-k*A)
+# -----------------------------
+def true_rhs(A, k=0.5):
+ return -k * A
+def simulate_kinetics(A0=1.0, k=0.5, t_end=10.0, dt=0.1):
+ t = np.arange(0, t_end + dt, dt)
+ A = np.zeros_like(t)
+ A[0] = A0
+ for i in range(1, len(t)):
+ # simple explicit Euler integrator
+ A[i] = A[i-1] + true_rhs(A[i-1], k) * dt
+ return t, A
+t, A = simulate_kinetics()
+# build training data: input = A(t), target = -dA/dt (i.e. rate)
+dA_dt = np.gradient(A, t)
+target_rate = -dA_dt
+data = pd.DataFrame({"t": t, "A": A, "rate": target_rate})
+# -----------------------------
+# 2. Define a simple “gene expression” representation:
+# expression trees built from a small function set
+# -----------------------------
+FUNCTIONS = [
+ ("add", 2, lambda x, y: x + y),
+ ("sub", 2, lambda x, y: x - y),
+ ("mul", 2, lambda x, y: x * y),
+ ("div", 2, lambda x, y: x / (y + 1e-8)), # protected division
+ ("sin", 1, lambda x: np.sin(x)),
+ ("exp", 1, lambda x: np.exp(np.clip(x, -5, 5))), # clip to
+avoid overflow
+11
+]
+TERMINALS = ["A", "const"] # concentration A and an ephemeral
+constant
+MAX_DEPTH = 4
+def random_const():
+ return random.uniform(-2.0, 2.0)
+class Node:
+ def __init__(self, kind, name=None, arity=0, func=None,
+value=None, children=None):
+ self.kind = kind # "func" or "term"
+ self.name = name
+ self.arity = arity
+ self.func = func
+ self.value = value # for const
+ self.children = children or []
+ def copy(self):
+ return Node(
+ self.kind,
+ self.name,
+ self.arity,
+ self.func,
+ self.value,
+ [c.copy() for c in self.children],
+ )
+def random_tree(depth=0):
+ if depth >= MAX_DEPTH or (depth > 0 and random.random() < 0.3):
+ term = random.choice(TERMINALS)
+ if term == "const":
+ return Node("term", "const", value=random_const())
+ else:
+ return Node("term", "A")
+ # function node
+ name, arity, func = random.choice(FUNCTIONS)
+ children = [random_tree(depth + 1) for _ in range(arity)]
+ return Node("func", name, arity, func, children=children)
+# -----------------------------
+# 3. Evaluation: map A -> rate_hat = f(A)
+# -----------------------------
+def eval_tree(node, A_values):
+ if node.kind == "term":
+ if node.name == "A":
+12
+ return A_values
+ elif node.name == "const":
+ return np.full_like(A_values, node.value, dtype=float)
+ else:
+ if node.arity == 1:
+ x = eval_tree(node.children[0], A_values)
+ return node.func(x)
+ elif node.arity == 2:
+ x = eval_tree(node.children[0], A_values)
+ y = eval_tree(node.children[1], A_values)
+ return node.func(x, y)
+def fitness(indiv, A_values, target):
+ y_pred = eval_tree(indiv, A_values)
+ # mean squared error; penalize NaNs/Infs
+ if np.any(np.isnan(y_pred)) or np.any(np.isinf(y_pred)):
+ return 1e9
+ return float(np.mean((y_pred - target) ** 2))
+# -----------------------------
+# 4. Genetic operators
+# -----------------------------
+def random_subtree(node):
+ # collect all nodes
+ nodes = []
+ def collect(n):
+ nodes.append(n)
+ for c in n.children:
+ collect(c)
+ collect(node)
+ return random.choice(nodes)
+def mutate(indiv, pmut=0.2):
+ child = indiv.copy()
+ if random.random() < pmut:
+ # replace a random subtree
+ subtree_parent = child
+ subtree = random_subtree(child)
+ # simple: just replace whole tree
+ # (for a minimal example; can refine to track parents)
+ return random_tree()
+ # small numeric mutation on constants
+ def mutate_const(n):
+ if n.kind == "term" and n.name == "const":
+ if random.random() < 0.5:
+ n.value += random.uniform(-0.5, 0.5)
+ for c in n.children:
+ mutate_const(c)
+13
+ mutate_const(child)
+ return child
+def crossover(parent1, parent2, pcross=0.7):
+ if random.random() > pcross:
+ return parent1.copy(), parent2.copy()
+ # deep copies
+ c1 = parent1.copy()
+ c2 = parent2.copy()
+ # naive subtree swap: treat root as subtree for this minimal
+example
+ return c2, c1
+# -----------------------------
+# 5. Main evolutionary loop
+# -----------------------------
+POP_SIZE = 50
+N_GEN = 40
+TOUR_SIZE = 3
+MUT_PROB = 0.7
+CROSS_PROB = 0.7
+# initialize population
+population = [random_tree() for _ in range(POP_SIZE)]
+def tournament_select(pop, fits, k=TOUR_SIZE):
+ idxs = random.sample(range(len(pop)), k)
+ best_i = min(idxs, key=lambda i: fits[i])
+ return pop[best_i]
+A_values = data["A"].values
+target = data["rate"].values
+best_indiv = None
+best_fit = 1e9
+for gen in range(N_GEN):
+ fits = [fitness(ind, A_values, target) for ind in population]
+ # track best
+ for ind, f in zip(population, fits):
+ if f < best_fit:
+ best_fit = f
+ best_indiv = ind
+ print(f"Gen {gen:03d} best MSE = {best_fit:.6e}")
+ # create new population
+14
+ new_pop = []
+ while len(new_pop) < POP_SIZE:
+ p1 = tournament_select(population, fits)
+ p2 = tournament_select(population, fits)
+ c1, c2 = crossover(p1, p2, CROSS_PROB)
+ c1 = mutate(c1, MUT_PROB)
+ c2 = mutate(c2, MUT_PROB)
+ new_pop.extend([c1, c2])
+ population = new_pop[:POP_SIZE]
+# -----------------------------
+# 6. Visualize learned rate law & integrated dynamics
+# -----------------------------
+# Evaluate predicted rate vs true target
+rate_hat = eval_tree(best_indiv, A_values)
+# integrate dA/dt = -rate_hat(A)
+A_model = np.zeros_like(A_values)
+A_model[0] = A_values[0]
+dt = t[1] - t[0]
+for i in range(1, len(A_model)):
+ A_model[i] = A_model[i-1] - rate_hat[i-1] * dt
+result_df = pd.DataFrame(
+ {"t": t, "A_true": A_values, "A_model": A_model,
+ "rate_true": target, "rate_hat": rate_hat}
+)
+# Plot concentration profiles
+plt.figure(figsize=(8, 4))
+plt.plot(result_df["t"], result_df["A_true"], label="A true")
+plt.plot(result_df["t"], result_df["A_model"], "--", label="A
+evolved model")
+plt.xlabel("Time")
+plt.ylabel("Concentration of A")
+plt.legend()
+plt.title("Chemical kinetics: true vs evolved model")
+plt.tight_layout()
+plt.show()
+# Plot rates
+plt.figure(figsize=(8, 4))
+plt.scatter(result_df["A_true"], result_df["rate_true"], s=15,
+label="True rate")
+plt.scatter(result_df["A_true"], result_df["rate_hat"], s=15,
+label="Evolved rate", alpha=0.7)
+plt.xlabel("A")
+plt.ylabel("Rate")
+15
+plt.legend()
+plt.title("Rate law: true vs evolved")
+plt.tight_layout()
+plt.show()
