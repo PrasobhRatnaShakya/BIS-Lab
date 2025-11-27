@@ -1,0 +1,119 @@
+# Grey Wolf Optimization (GWO) for Image Thresholding Segmentation 
+in Colab
+# 1. Upload image from your device
+from google.colab import files
+uploaded = files.upload()
+img_path = list(uploaded.keys())[0]
+print(f"Uploaded image: {img_path}")
+# 2. Import required libraries
+import cv2
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import random
+# 3. Load image and flatten pixel array
+img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+if img is None:
+ raise FileNotFoundError("Could not read image!")
+pixels = img.flatten()
+# 4. Fitness Function - Otsu's between-class variance (higher is 
+better)
+def otsu_between_class_variance(threshold, pixels):
+ threshold = int(np.clip(threshold, 0, 255))
+ hist, _ = np.histogram(pixels, bins=256, range=(0, 256))
+ total = pixels.size
+ w0 = hist[:threshold].sum() / total
+ w1 = hist[threshold:].sum() / total
+ if w0 == 0 or w1 == 0:
+ return 0.0
+ mu0 = np.sum(np.arange(0, threshold) * hist[:threshold]) / 
+(hist[:threshold].sum() + 1e-8)
+ mu1 = np.sum(np.arange(threshold, 256) * hist[threshold:]) / 
+(hist[threshold:].sum() + 1e-8)
+ return w0 * w1 * (mu0 - mu1) ** 2
+def fitness(threshold, pixels):
+ # GWO minimizes by default, so use negative - higher variance 
+is better
+ return -otsu_between_class_variance(threshold, pixels)
+# 5. Minimal GWO Implementation for Single-Threshold Optimization
+class GreyWolfOptimizer:
+ def __init__(self, n_wolves, n_iters, min_x, max_x):
+ self.n_wolves = n_wolves
+34
+ self.n_iters = n_iters
+ self.min_x = min_x
+ self.max_x = max_x
+ def optimize(self, obj_func, pixels):
+ wolves = np.random.uniform(self.min_x, self.max_x, 
+size=(self.n_wolves,))
+ alpha_score = float('inf')
+ beta_score = float('inf')
+ gamma_score = float('inf')
+ alpha_pos, beta_pos, gamma_pos = None, None, None
+ history = []
+ for iter in range(self.n_iters):
+ for i in range(self.n_wolves):
+ score = obj_func(wolves[i], pixels)
+ # Best, second-best, third-best positions
+ if score < alpha_score:
+ gamma_score, gamma_pos = beta_score, beta_pos
+ beta_score, beta_pos = alpha_score, alpha_pos
+ alpha_score, alpha_pos = score, wolves[i]
+ elif score < beta_score:
+ gamma_score, gamma_pos = beta_score, beta_pos
+ beta_score, beta_pos = score, wolves[i]
+ elif score < gamma_score:
+ gamma_score, gamma_pos = score, wolves[i]
+ # Position updating
+ a = 2 - iter * (2 / self.n_iters)
+ for i in range(self.n_wolves):
+ for leader_score, leader_pos in zip([alpha_score, 
+beta_score, gamma_score],
+ [alpha_pos, 
+beta_pos, gamma_pos]):
+ r1, r2 = random.random(), random.random()
+ A = 2 * a * r1 - a
+ C = 2 * r2
+ D = abs(C * leader_pos - wolves[i])
+ X = leader_pos - A * D
+ if leader_pos is alpha_pos:
+ X1 = X
+ elif leader_pos is beta_pos:
+ X2 = X
+ else:
+ X3 = X
+ wolves[i] = np.clip((X1 + X2 + X3) / 3, self.min_x, 
+self.max_x)
+ history.append((iter, alpha_pos, alpha_score))
+35
+ print(f"Iter {iter:02d}: best threshold = 
+{alpha_pos:.2f}, fitness = {alpha_score:.3e}")
+ hist_df = pd.DataFrame(history, columns=["iter", 
+"best_threshold", "fitness"])
+ return int(round(alpha_pos)), hist_df
+# 6. Run GWO to find the optimal threshold
+n_wolves = 20
+n_iters = 50
+gwo = GreyWolfOptimizer(n_wolves, n_iters, 0, 255)
+best_threshold, hist = gwo.optimize(fitness, pixels)
+print(f"Best threshold found by GWO: {best_threshold}")
+# 7. Segment image and visualize results
+_, segmented = cv2.threshold(img, best_threshold, 255, 
+cv2.THRESH_BINARY)
+plt.figure(figsize=(14,5))
+plt.subplot(1,3,1)
+plt.imshow(img, cmap='gray')
+plt.title("Original Image")
+plt.axis('off')
+plt.subplot(1,3,2)
+plt.imshow(segmented, cmap='gray')
+plt.title(f"Segmented (Threshold = {best_threshold})")
+plt.axis('off')
+plt.subplot(1,3,3)
+plt.plot(hist["iter"], -hist["fitness"])
+plt.xlabel("Iteration")
+plt.ylabel("Otsu Between-Class Variance")
+plt.title("GWO Convergence")
+plt.grid(True)
+plt.tight_layout()
+plt.show()
