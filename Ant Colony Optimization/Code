@@ -1,0 +1,116 @@
+import numpy as np
+import networkx as nx
+import matplotlib.pyplot as plt
+import pandas as pd
+# Traffic network graph (nodes: intersections, edges: roads)
+# We'll use NetworkX to create and visualize the graph
+def create_traffic_graph():
+G = nx.Graph()
+# Add nodes (intersections)
+for i in range(6):
+G.add_node(i)
+# Add edges (roads) with initial distance (weight) and 
+pheromone level
+edges = [
+(0, 1, 2), (0, 2, 2), (1, 2, 1), (1, 3, 1),
+(2, 3, 2), (2, 4, 3), (3, 4, 2), (3, 5, 1),
+(4, 5, 2)
+]
+for (u, v, dist) in edges:
+G.add_edge(u, v, distance=dist, pheromone=1.0)
+return G
+# Visualize graph with pheromone intensity on edges
+def visualize_graph(G, title="Traffic Network"):
+pos = nx.spring_layout(G, seed=42)
+edge_labels = {(u, v): f"{d['distance']}\n{d['pheromone']:.2f}" 
+for u, v, d in G.edges(data=True)}
+pheromones = np.array([d['pheromone'] for _, _, d in 
+G.edges(data=True)])
+# Normalize pheromones for edge width
+widths = 2 + 5 * (pheromones - pheromones.min()) / 
+(pheromones.max() - pheromones.min() + 1e-6)
+plt.figure(figsize=(8,6))
+nx.draw(G, pos, with_labels=True, node_size=600, 
+node_color='skyblue', width=widths)
+nx.draw_networkx_edge_labels(G, pos, edge_labels=edge_labels, 
+font_color='red')
+plt.title(title)
+plt.show()
+# Ant Colony Optimization for path from start to end node
+def ant_colony_optimization(G, start, end, n_ants=10, 
+n_iterations=50, alpha=1, beta=2, rho=0.1, Q=1):
+"""
+alpha: pheromone importance
+23
+beta: heuristic importance (1/distance)
+rho: pheromone evaporation rate
+Q: pheromone deposit factor
+"""
+nodes = list(G.nodes())
+best_path = None
+best_length = float('inf')
+for iteration in range(n_iterations):
+all_paths = []
+all_lengths = []
+for ant in range(n_ants):
+path = [start]
+visited = set(path)
+while path[-1] != end:
+current = path[-1]
+neighbors = list(G.neighbors(current))
+# Allowed moves: neighbors not visited yet
+allowed = [n for n in neighbors if n not in 
+visited]
+if len(allowed) == 0:
+# Dead end, backtrack randomly (or break)
+break
+# Calculate probabilities based on pheromone and 
+heuristic
+pheromones = np.array([G[current][nbr]['pheromone'] 
+for nbr in allowed])
+distances = np.array([G[current][nbr]['distance'] 
+for nbr in allowed])
+heuristic = 1 / distances
+prob = (pheromones ** alpha) * (heuristic ** beta)
+prob /= prob.sum()
+next_node = np.random.choice(allowed, p=prob)
+path.append(next_node)
+visited.add(next_node)
+# Calculate path length
+length = sum(G[path[i]][path[i+1]]['distance'] for i in 
+range(len(path)-1))
+all_paths.append(path)
+all_lengths.append(length)
+24
+# Update best path
+if length < best_length and path[-1] == end:
+best_length = length
+best_path = path
+# Evaporate pheromones
+for u, v in G.edges():
+G[u][v]['pheromone'] *= (1 - rho)
+if G[u][v]['pheromone'] < 0.1:
+G[u][v]['pheromone'] = 0.1 # minimum pheromone
+# Deposit pheromones based on paths found
+for path, length in zip(all_paths, all_lengths):
+if path[-1] == end:
+deposit = Q / length
+for i in range(len(path)-1):
+u, v = path[i], path[i+1]
+G[u][v]['pheromone'] += deposit
+print(f"Iteration {iteration+1}/{n_iterations}, best 
+length: {best_length:.2f}")
+return best_path, best_length
+# Main execution
+if __name__ == "__main__":
+G = create_traffic_graph()
+visualize_graph(G, title="Initial Traffic Network (Distance / 
+Pheromone)")
+start_node = 0
+end_node = 5
+best_path, best_length = ant_colony_optimization(G, start_node, 
+end_node, n_ants=20, n_iterations=100)
+print(f"\nBest path found: {best_path} with length 
+{best_length:.2f}")
+visualize_graph(G, title="Traffic Network after ACO 
+Optimization")
